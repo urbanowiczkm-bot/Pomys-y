@@ -34,6 +34,7 @@
   --signal:#e0a526; --signal-ink:#1b1e17; --olive:#8fa072; --danger:#e07a63;
 }
 *,*::before,*::after{box-sizing:inherit}
+[hidden]{display:none!important}
 html{scroll-padding-top:env(safe-area-inset-top,0px)}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "IBM Plex Sans",-apple-system,"Segoe UI",sans-serif;-webkit-text-size-adjust:100%}
 .wrap{max-width:560px;margin:0 auto;padding:20px 16px 48px}
@@ -98,6 +99,13 @@ dialog textarea{height:40vh;border:1px solid var(--line);padding:8px;font-size:.
 .backup h2{font:700 1.2rem "Barlow Condensed",sans-serif;margin:0 0 4px}
 .backup p{font-size:.88rem;color:var(--muted);margin:0 0 10px}
 .backup .acts{gap:10px}
+.fl{display:block;font-size:.85rem;color:var(--muted);margin-bottom:10px}
+.fl input{display:block;width:100%;margin-top:4px;padding:10px;border:1px solid var(--line);border-radius:4px;background:var(--paper);color:var(--ink);font:inherit;font-size:16px}
+.fl input:focus{outline:2px solid var(--signal);outline-offset:0}
+.sync{font-size:.9rem;color:var(--ink)!important}
+.sync.err{color:var(--danger)!important}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--olive);margin-right:6px;vertical-align:middle}
+.err .dot{background:var(--danger)}
 .status{font-size:.8rem;color:var(--muted);margin-top:26px}
 @media (prefers-reduced-motion:reduce){.toast{transition:none}}
 </style>
@@ -136,6 +144,20 @@ dialog textarea{height:40vh;border:1px solid var(--line);padding:8px;font-size:.
       <input type="file" id="importFile" accept=".json,application/json" hidden>
     </div>
   </section>
+  <section class="backup" id="ghSection">
+    <h2>Połączenie z GitHubem</h2>
+    <p id="ghInfo">Po połączeniu pomysły zapisują się też w Twoim prywatnym repozytorium. Nie zginą po zamknięciu aplikacji ani przy zmianie telefonu, a projekt w Claude może je czytać.</p>
+    <div id="ghForm">
+      <label class="fl">Login na GitHubie<input id="ghOwner" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="np. urbanowiczkm-bot"></label>
+      <label class="fl">Nazwa prywatnego repozytorium<input id="ghRepo" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="np. pomysly-dane"></label>
+      <label class="fl">Token dostępu<input id="ghToken" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="github_pat_…"></label>
+      <div class="acts"><button class="act primary" id="ghConnect">Połącz</button></div>
+    </div>
+    <div id="ghOn" hidden>
+      <p class="sync" id="syncState"></p>
+      <div class="acts"><button class="act primary" id="ghSyncNow">Synchronizuj teraz</button><button class="act" id="ghDisconnect">Rozłącz</button></div>
+    </div>
+  </section>
   <p class="status" id="status"></p>
 </div>
 
@@ -158,8 +180,16 @@ const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
 const LS="ideas-v1";
 function lsLoad(){try{return JSON.parse(localStorage.getItem(LS)||"[]")}catch(e){return[]}}
 function lsSave(){try{localStorage.setItem(LS,JSON.stringify(ideas))}catch(e){}}
-async function put(idea){const i=ideas.findIndex(x=>x.id===idea.id);i>=0?ideas[i]=idea:ideas.push(idea);lsSave();render()}
-async function remove(id){ideas=ideas.filter(x=>x.id!==id);lsSave();render()}
+function live(){return ideas.filter(x=>!x.deleted)}
+async function put(idea){idea={...idea,updated:Date.now()};const i=ideas.findIndex(x=>x.id===idea.id);i>=0?ideas[i]=idea:ideas.push(idea);lsSave();render();schedulePush()}
+async function remove(id){const i=ideas.findIndex(x=>x.id===id);if(i<0)return;ideas[i]={id,deleted:true,updated:Date.now()};lsSave();render();schedulePush()}
+// szkic: to, co wpisujesz, przetrwa zamknięcie okna
+const DRAFT="draft-v1";
+function saveDraft(){try{localStorage.setItem(DRAFT,JSON.stringify({idea:$("#idea").value,note:$("#note").value,cat}))}catch(e){}}
+function loadDraft(){try{const d=JSON.parse(localStorage.getItem(DRAFT)||"null");if(!d)return;
+  $("#idea").value=d.idea||"";$("#note").value=d.note||"";autosize($("#idea"));autosize($("#note"));
+  $("#save").disabled=!$("#idea").value.trim();
+  if(d.cat){cat=d.cat;document.querySelectorAll("#cats .chip").forEach(b=>b.setAttribute("aria-pressed",String(b.textContent===d.cat)))}}catch(e){}}
 
 // ---- capture ----
 $("#cats").innerHTML=CATS.map(c=>`<button class="chip" aria-pressed="false">${c}</button>`).join("");
@@ -167,16 +197,17 @@ $("#cats").addEventListener("click",e=>{
   const b=e.target.closest(".chip");if(!b)return;
   const on=b.getAttribute("aria-pressed")!=="true";
   document.querySelectorAll(".chip").forEach(x=>x.setAttribute("aria-pressed","false"));
-  b.setAttribute("aria-pressed",String(on));cat=on?b.textContent:null;
+  b.setAttribute("aria-pressed",String(on));cat=on?b.textContent:null;saveDraft();
 });
 function autosize(t){t.style.height="auto";t.style.height=t.scrollHeight+"px"}
-["#idea","#note"].forEach(s=>$(s).addEventListener("input",e=>{autosize(e.target);$("#save").disabled=!$("#idea").value.trim()}));
+["#idea","#note"].forEach(s=>$(s).addEventListener("input",e=>{autosize(e.target);$("#save").disabled=!$("#idea").value.trim();saveDraft()}));
 $("#save").addEventListener("click",async()=>{stopRec();
   const text=$("#idea").value.trim();if(!text)return;
   const idea={id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),text,note:$("#note").value.trim(),cat:cat||"",status:"new",created:Date.now()};
   $("#save").disabled=true;
   try{await put(idea);$("#idea").value="";$("#note").value="";autosize($("#idea"));autosize($("#note"));
     document.querySelectorAll(".chip").forEach(x=>x.setAttribute("aria-pressed","false"));cat=null;
+    try{localStorage.removeItem(DRAFT)}catch(e){}
     toast("Zapisano pomysł",false)}
   catch(e){toast("Nie zapisano — sprawdź połączenie i spróbuj ponownie",false);$("#save").disabled=false}
 });
@@ -214,7 +245,7 @@ async function sendToClaude(list){
   for(const x of list){if(x.status==="new")await put({...x,status:"sent",sent:Date.now()})}
 }
 $("#closeManual").addEventListener("click",()=>$("#manual").close());
-$("#copyAll").addEventListener("click",()=>sendToClaude(ideas.filter(x=>x.status==="new").sort((a,b)=>a.created-b.created)));
+$("#copyAll").addEventListener("click",()=>sendToClaude(live().filter(x=>x.status==="new").sort((a,b)=>a.created-b.created)));
 
 // ---- list ----
 const FTYPES=[["zwrot","Zwrot"],["zdanie","Zdanie"],["przem","Przemyślenie"]];
@@ -226,11 +257,12 @@ function fmt(ts){return new Date(ts).toLocaleDateString("pl-PL",{day:"numeric",m
 const MIC_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
 function render(){
   if(activeRec)return; // nie przerywaj dyktowania
-  for(const k of ["new","sent","done"]){const n=ideas.filter(x=>x.status===k).length;$("#c-"+k).textContent=n?n:""}
-  const rows=ideas.filter(x=>x.status===filter).sort((a,b)=>b.created-a.created);
+  for(const k of ["new","sent","done"]){const n=live().filter(x=>x.status===k).length;$("#c-"+k).textContent=n?n:""}
+  const rows=live().filter(x=>x.status===filter).sort((a,b)=>b.created-a.created);
   $("#bulk").hidden=!(filter==="new"&&rows.length>1);
   if(!rows.length){$("#list").innerHTML=`<li class="empty">${filter==="new"?"Brak nowych pomysłów. Zapisz pierwszy powyżej.":filter==="sent"?"Pomysły wysłane do Claude pojawią się tutaj.":"Tu trafią pomysły, które stały się postami."}</li>`;return}
-  const draft=openAdder&&$("#adderText")?$("#adderText").value:"";
+  let draft=openAdder&&$("#adderText")?$("#adderText").value:"";
+  if(openAdder&&!$("#adderText")){try{const d=JSON.parse(localStorage.getItem("adder-draft")||"null");if(d&&d.id===openAdder)draft=d.text||""}catch(e){}}
   $("#list").innerHTML=rows.map(x=>{
     const fr=x.fragments||[];
     return `<li class="item" data-id="${x.id}">
@@ -258,15 +290,15 @@ function render(){
 }
 $("#list").addEventListener("click",async e=>{
   const b=e.target.closest("[data-a]");if(!b)return;
-  const x=ideas.find(i=>i.id===b.closest("li").dataset.id);if(!x)return;
+  const x=live().find(i=>i.id===b.closest("li").dataset.id);if(!x)return;
   const a=b.dataset.a;
   if(a==="open"){openAdder=x.id;render()}
-  if(a==="cancel"){stopRec();openAdder=null;$("#adderText").value="";render()}
+  if(a==="cancel"){stopRec();openAdder=null;$("#adderText").value="";try{localStorage.removeItem("adder-draft")}catch(err){}render()}
   if(a==="type"){adderType=b.dataset.t;render()}
   if(a==="mic"){toggleRec(b,$("#adderText"))}
   if(a==="addfrag"){stopRec();const t=$("#adderText").value.trim();if(!t)return;
     const fr=[...(x.fragments||[]),{id:Date.now().toString(36),type:adderType,text:t,created:Date.now()}];
-    $("#adderText").value="";
+    $("#adderText").value="";try{localStorage.removeItem("adder-draft")}catch(err){}
     try{await put({...x,fragments:fr});toast("Dodano notatkę",false)}catch(err){toast("Nie zapisano — spróbuj ponownie",false)}
     render()}
   if(a==="delfrag"&&confirm("Usunąć tę notatkę?"))put({...x,fragments:(x.fragments||[]).filter(f=>f.id!==b.dataset.f)});
@@ -275,7 +307,7 @@ $("#list").addEventListener("click",async e=>{
   if(a==="back")put({...x,status:"new"});
   if(a==="del"&&confirm("Usunąć ten pomysł razem z notatkami?"))remove(x.id);
 });
-$("#list").addEventListener("input",e=>{if(e.target.id==="adderText")autosize(e.target)});
+$("#list").addEventListener("input",e=>{if(e.target.id==="adderText"){autosize(e.target);try{localStorage.setItem("adder-draft",JSON.stringify({id:openAdder,type:adderType,text:e.target.value}))}catch(err){}}});
 
 let tt;function toast(msg,link){$("#toastMsg").textContent=msg;$("#toastLink").style.display=link?"":"none";
   $("#toast").classList.add("show");clearTimeout(tt);tt=setTimeout(()=>$("#toast").classList.remove("show"),link?6000:2200)}
@@ -299,7 +331,7 @@ if(SR){$("#mic").hidden=false;$("#micHint").textContent="Stuknij mikrofon i mów
 
 // ---- backup ----
 $("#exportBtn").addEventListener("click",async()=>{
-  const data=JSON.stringify({app:"bank-pomyslow",version:1,exported:new Date().toISOString(),ideas},null,2);
+  const data=JSON.stringify({app:"bank-pomyslow",version:1,exported:new Date().toISOString(),ideas:live()},null,2);
   const name="pomysly-"+new Date().toISOString().slice(0,10)+".json";
   const file=new File([data],name,{type:"application/json"});
   if(navigator.canShare&&navigator.canShare({files:[file]})){try{await navigator.share({files:[file],title:name});return}catch(e){if(e.name==="AbortError")return}}
@@ -310,13 +342,117 @@ $("#importBtn").addEventListener("click",()=>$("#importFile").click());
 $("#importFile").addEventListener("change",async e=>{
   const f=e.target.files[0];e.target.value="";if(!f)return;
   try{const d=JSON.parse(await f.text());const inc=Array.isArray(d)?d:d.ideas;if(!Array.isArray(inc))throw 0;
-    let added=0;for(const x of inc){if(x&&x.id&&x.text&&!ideas.some(y=>y.id===x.id)){ideas.push(x);added++}}
-    lsSave();render();toast(added?`Wczytano ${added} pomysłów`:"Wszystkie pomysły z kopii już tu są",false)}
+    let added=0;for(const x of inc){if(x&&x.id&&x.text&&!ideas.some(y=>y.id===x.id)){ideas.push({...x,updated:x.updated||Date.now()});added++}}
+    lsSave();render();schedulePush();toast(added?`Wczytano ${added} pomysłów`:"Wszystkie pomysły z kopii już tu są",false)}
   catch(err){toast("To nie jest plik kopii z tej aplikacji",false)}
 });
 
+// ---- GitHub sync ----
+const GH="gh-v1";
+let gh=null; try{gh=JSON.parse(localStorage.getItem(GH)||"null")}catch(e){}
+let pushTimer=null, syncing=false, again=false, lastSync=null, syncErr=null;
+const JSON_PATH="pomysly.json", MD_PATH="pomysly.md";
+function b64enc(str){const bytes=new TextEncoder().encode(str);let bin="";for(let i=0;i<bytes.length;i+=8192)bin+=String.fromCharCode(...bytes.subarray(i,i+8192));return btoa(bin)}
+function b64dec(b64){const bin=atob(b64.replace(/\s/g,""));const bytes=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder().decode(bytes)}
+async function ghApi(path,opt={}){
+  const r=await fetch(`https://api.github.com/repos/${encodeURIComponent(gh.owner)}/${encodeURIComponent(gh.repo)}/contents/${path}`,{
+    ...opt,cache:"no-store",headers:{"Accept":"application/vnd.github+json","Authorization":"Bearer "+gh.token,"X-GitHub-Api-Version":"2022-11-28",...(opt.body?{"Content-Type":"application/json"}:{})}});
+  return r;
+}
+async function ghGet(path){
+  const r=await ghApi(path);
+  if(r.status===404)return {sha:null,text:null};
+  if(!r.ok)throw new Error(r.status===401?"Token jest nieprawidłowy lub wygasł":r.status===403?"Token nie ma uprawnień do zapisu w tym repozytorium":"GitHub odpowiedział błędem "+r.status);
+  const d=await r.json();return {sha:d.sha,text:b64dec(d.content||"")};
+}
+async function ghPut(path,text,sha,msg){
+  const r=await ghApi(path,{method:"PUT",body:JSON.stringify({message:msg,content:b64enc(text),...(sha?{sha}:{})})});
+  if(!r.ok){const e=new Error("Zapis na GitHubie nie powiódł się ("+r.status+")");e.status=r.status;throw e}
+  return (await r.json()).content.sha;
+}
+function merge(remote){
+  const map=new Map(ideas.map(x=>[x.id,x]));let changed=false;
+  for(const x of remote){if(!x||!x.id)continue;const l=map.get(x.id);
+    if(!l||(x.updated||0)>(l.updated||0)){map.set(x.id,x);changed=true}}
+  ideas=[...map.values()];return changed;
+}
+function sameData(remote){const a=JSON.stringify([...remote].sort((x,y)=>x.id<y.id?-1:1));const b=JSON.stringify([...ideas].sort((x,y)=>x.id<y.id?-1:1));return a===b}
+function toMarkdown(){
+  const L=[];const d=new Date().toLocaleString("pl-PL");
+  L.push("# Bank pomysłów na posty LinkedIn","",`Plik aktualizowany automatycznie przez aplikację Bank pomysłów. Ostatnia aktualizacja: ${d}.`,"","Każdy pomysł ma status: nowy (czeka na rozwinięcie), w Claude (w trakcie pracy) albo opublikowany. Notatki pod pomysłem to mój surowy materiał: zwroty, gotowe zdania i przemyślenia. Przy rozwijaniu posta zachowuj ich sens i moje sformułowania.","");
+  const groups=[["new","Nowe pomysły"],["sent","W trakcie pracy w Claude"],["done","Opublikowane"]];
+  for(const [k,h] of groups){
+    const rows=live().filter(x=>x.status===k).sort((a,b)=>b.created-a.created);
+    L.push(`## ${h} (${rows.length})`,"");
+    if(!rows.length){L.push("_Brak._","");continue}
+    for(const x of rows){
+      L.push(`### ${x.text.replace(/\n+/g," ")}`);
+      L.push(`- Dodano: ${new Date(x.created).toLocaleDateString("pl-PL")}${x.cat?` · Kategoria: ${x.cat}`:""} · ID: ${x.id}`);
+      if(x.note)L.push(`- Kontekst: ${x.note.replace(/\n+/g," ")}`);
+      const fr=x.fragments||[];
+      for(const [t,lab] of [["zwrot","Zwroty"],["zdanie","Zdania"],["przem","Przemyślenia"]]){
+        const f=fr.filter(y=>y.type===t);if(f.length){L.push(`- ${lab}:`);f.forEach(y=>L.push(`  - ${y.text.replace(/\n+/g," ")}`))}
+      }
+      L.push("");
+    }
+  }
+  return L.join("\n");
+}
+function showSync(){
+  const on=!!gh;$("#ghForm").hidden=on;$("#ghOn").hidden=!on;
+  $("#status").textContent=on?"":"Pomysły zapisane na tym telefonie. Połącz GitHuba, żeby mieć kopię w chmurze.";
+  if(!on)return;
+  const el=$("#syncState");el.classList.toggle("err",!!syncErr);
+  el.innerHTML=`<span class="dot"></span>`+esc(syncErr?syncErr:syncing?"Synchronizuję…":pushTimer?"Zmiany czekają na wysłanie…":lastSync?`Zsynchronizowano o ${lastSync.toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"})} · ${gh.owner}/${gh.repo}`:`Połączono z ${gh.owner}/${gh.repo}`);
+}
+function schedulePush(){if(!gh)return;clearTimeout(pushTimer);pushTimer=setTimeout(()=>{pushTimer=null;sync()},1500);showSync()}
+async function sync(){
+  if(!gh)return;
+  if(syncing){again=true;return}
+  syncing=true;syncErr=null;showSync();
+  try{
+    for(let attempt=0;attempt<3;attempt++){
+      const remote=await ghGet(JSON_PATH);
+      let remoteList=[];if(remote.text){try{const d=JSON.parse(remote.text);remoteList=Array.isArray(d)?d:(d.ideas||[])}catch(e){}}
+      if(merge(remoteList)){lsSave();render()}
+      if(remote.text&&sameData(remoteList))break; // nic do wysłania
+      try{
+        await ghPut(JSON_PATH,JSON.stringify({app:"bank-pomyslow",version:2,ideas},null,1),remote.sha,"Aktualizacja pomysłów (dane)");
+      }catch(e){if(e.status===409||e.status===422){continue}throw e}
+      const md=await ghGet(MD_PATH);
+      try{await ghPut(MD_PATH,toMarkdown(),md.sha,"Aktualizacja pomysłów")}catch(e){if(!(e.status===409||e.status===422))throw e}
+      break;
+    }
+    lastSync=new Date();
+  }catch(e){syncErr=navigator.onLine===false?"Brak internetu — wyślę zmiany, gdy wróci połączenie":(e.message||"Błąd synchronizacji")}
+  syncing=false;showSync();
+  if(again){again=false;sync()}
+}
+$("#ghConnect").addEventListener("click",async()=>{
+  const owner=$("#ghOwner").value.trim().replace(/^@/,""),repo=$("#ghRepo").value.trim(),token=$("#ghToken").value.trim();
+  if(!owner||!repo||!token){toast("Uzupełnij wszystkie trzy pola",false);return}
+  gh={owner,repo,token};$("#ghConnect").disabled=true;$("#ghConnect").textContent="Sprawdzam…";
+  try{
+    const r=await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,{cache:"no-store",headers:{"Accept":"application/vnd.github+json","Authorization":"Bearer "+token,"X-GitHub-Api-Version":"2022-11-28"}});
+    if(r.status===401)throw new Error("Token jest nieprawidłowy");
+    if(r.status===404)throw new Error("Nie widzę tego repozytorium. Sprawdź login, nazwę i czy token ma do niego dostęp");
+    if(!r.ok)throw new Error("GitHub odpowiedział błędem "+r.status);
+    const info=await r.json();
+    if(!info.private&&!confirm("To repozytorium jest PUBLICZNE — każdy będzie mógł czytać Twoje pomysły. Na pewno połączyć?"))throw new Error("Anulowano");
+    localStorage.setItem(GH,JSON.stringify(gh));$("#ghToken").value="";
+    showSync();await sync();if(!syncErr)toast("Połączono z GitHubem",false);
+  }catch(e){gh=null;toast(e.message,false)}
+  $("#ghConnect").disabled=false;$("#ghConnect").textContent="Połącz";showSync();
+});
+$("#ghSyncNow").addEventListener("click",()=>{clearTimeout(pushTimer);pushTimer=null;sync()});
+$("#ghDisconnect").addEventListener("click",()=>{if(!confirm("Rozłączyć GitHuba? Pomysły zostaną na telefonie i w repozytorium."))return;
+  gh=null;try{localStorage.removeItem(GH)}catch(e){};lastSync=null;syncErr=null;showSync()});
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")sync()});
+window.addEventListener("online",()=>sync());
+window.addEventListener("pagehide",()=>{if(pushTimer){clearTimeout(pushTimer);pushTimer=null;sync()}});
+
 // ---- boot ----
-ideas=lsLoad();render();
+ideas=lsLoad();loadDraft();render();showSync();sync();
 if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
 if("serviceWorker" in navigator&&location.protocol==="https:")navigator.serviceWorker.register("sw.js").catch(()=>{});
 </script>
